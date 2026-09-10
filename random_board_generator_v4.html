@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>15×5 랜덤 보드 생성기</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#111;color:#eee;font-family:Arial,"Malgun Gothic",sans-serif}
+  .wrap{max-width:1500px;margin:0 auto;padding:24px}
+  h1{margin:0 0 8px}
+  .desc{color:#aaa;margin-bottom:18px}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  button{background:#333;color:#fff;border:1px solid #666;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:bold}
+  button:hover{background:#444}
+  .board{position:relative;background:#181818;border:1px solid #333;border-radius:12px;overflow:auto}
+  #svg{position:absolute;left:0;top:0;pointer-events:none}
+  #nodes{position:relative;display:grid;grid-template-columns:repeat(15,100px);grid-template-rows:repeat(5,90px);gap:0;padding:35px 30px;width:1560px;height:520px}
+  .node{width:58px;height:58px;border-radius:50%;border:3px solid #777;display:flex;align-items:center;justify-content:center;
+        font-size:25px;position:relative;z-index:2;cursor:pointer;user-select:none;background:#222;justify-self:center;align-self:center}
+  .node span{font-size:11px;position:absolute;top:61px;white-space:nowrap;color:#bbb}
+  .combat{border-color:#e65b5b}.event{border-color:#58a6e6}.shop{border-color:#e0b34d}.rest{border-color:#69c37a}.boss{border-color:#b56cff;background:#2a1938}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:15px;color:#bbb}
+  .legend b{margin-right:5px}
+  .info{margin-top:18px;background:#181818;border:1px solid #333;border-radius:10px;padding:15px;line-height:1.7}
+  .ok{color:#69c37a}.warn{color:#e0b34d}
+  code{background:#222;padding:2px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>15×5 랜덤 보드 생성기</h1>
+  <div class="desc">
+    왼쪽 → 오른쪽 진행 / 같은 열 연결 없음 / 전투 50% / 비전투 동일 속성 연속 금지 / 마지막 열은 보스 1개
+  </div>
+  <div class="controls">
+    <button onclick="generate()">🎲 새 보드</button>
+    <button onclick="validate()">검증</button>
+    <button onclick="downloadBoard()">JSON 저장</button>
+  </div>
+
+  <div class="board">
+    <svg id="svg" width="1560" height="520"></svg>
+    <div id="nodes"></div>
+  </div>
+
+  <div class="legend">
+    <div><b>⚔</b> 전투</div>
+    <div><b>?</b> 이벤트</div>
+    <div><b>🛒</b> 상점</div>
+    <div><b>♨</b> 휴식</div>
+    <div><b>👑</b> 보스</div>
+  </div>
+
+  <div class="info" id="info"></div>
+</div>
+
+<script>
+const COLS=15, ROWS=5;
+const TYPES=[
+  {id:"combat", name:"전투", icon:"⚔"},
+  {id:"event", name:"이벤트", icon:"?"},
+  {id:"shop", name:"상점", icon:"🛒"},
+  {id:"rest", name:"휴식", icon:"♨"}
+];
+
+let board=[];
+
+function rand(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+// 비전투는 동일 속성이 연속되지 않도록 생성.
+// 여러 부모가 있는 경우, 부모 중 하나라도 같은 속성을 갖고 있으면 해당 속성을 후보에서 제외.
+function chooseType(parents){
+  if(!parents.length) return "combat";
+
+  // 전투는 항상 50%를 우선 적용
+  if(Math.random()<0.5) return "combat";
+
+  const blocked=new Set(
+    parents.map(p=>p.type).filter(t=>t!=="combat")
+  );
+  const candidates=TYPES.filter(t=>t.id!=="combat" && !blocked.has(t.id));
+  return candidates.length ? rand(candidates).id : rand(TYPES.filter(t=>t.id!=="combat")).id;
+}
+
+// 인접한 다음 열로 연결.
+// 허용 연결은 수평/대각선뿐: row 차이가 0 또는 1.
+// 즉 같은 열에서 위/아래로 이동하는 수직 연결은 존재하지 않는다.
+function possibleTargets(row){
+  const out=[];
+  for(const r of [row-1,row,row+1]){
+    if(r>=0 && r<ROWS) out.push(r);
+  }
+  return out;
+}
+
+function generate(){
+  board=Array.from({length:COLS},()=>Array(ROWS).fill(null));
+
+  // 1열 시작점: 하나만 존재.
+  // 2열의 3개 이상 노드에 연결되도록 시작 행을 중앙으로 고정.
+  const startRow=2;
+  board[0][startRow]={
+    id:"0-2", col:0,row:startRow,type:"start",parents:[],children:[]
+  };
+
+  // 2열에는 시작점에서 최소 3개 경로가 나오도록 1,2,3행을 생성.
+  for(const r of [1,2,3]){
+    board[1][r]={id:`1-${r}`,col:1,row:r,type:null,parents:[],children:[]};
+    board[0][startRow].children.push(board[1][r].id);
+    board[1][r].parents.push(board[0][startRow].id);
+  }
+
+  // 2열 이후: 각 노드가 최소 하나의 다음 노드를 갖도록 연결을 생성.
+  for(let c=1;c<COLS-1;c++){
+    const current=board[c].filter(Boolean);
+
+    // 우선 각 현재 노드에서 다음 열의 후보 중 하나를 연결.
+    const targetRows=new Set();
+    for(const node of current){
+      const r=rand(possibleTargets(node.row));
+      targetRows.add(r);
+    }
+
+    // 연결을 유지하면서 다음 열에 최소 2~3개의 분기가 자연스럽게 생기도록
+    // 현재 열의 중앙/외곽 후보도 확률적으로 추가.
+    for(const node of current){
+      for(const r of possibleTargets(node.row)){
+        if(Math.random()<0.32) targetRows.add(r);
+      }
+    }
+
+    // 다음 열 노드 생성
+    for(const r of [...targetRows].sort((a,b)=>a-b)){
+      if(!board[c+1][r]){
+        board[c+1][r]={id:`${c+1}-${r}`,col:c+1,row:r,type:null,parents:[],children:[]};
+      }
+    }
+
+    // 현재 → 다음 연결
+    for(const node of current){
+      const candidates=[...targetRows].filter(r=>Math.abs(r-node.row)<=1);
+      if(!candidates.length) continue;
+      const r=rand(candidates);
+      const target=board[c+1][r];
+      if(!node.children.includes(target.id)){
+        node.children.push(target.id);
+        target.parents.push(node.id);
+      }
+    }
+
+    // 고립된 다음 노드가 없도록 각 다음 노드에 부모 하나 이상 보장
+    for(const target of board[c+1].filter(Boolean)){
+      if(!target.parents.length){
+        const candidates=current.filter(n=>Math.abs(n.row-target.row)<=1);
+        if(candidates.length){
+          const parent=rand(candidates);
+          parent.children.push(target.id);
+          target.parents.push(parent.id);
+        }
+      }
+    }
+  }
+
+  // 마지막 보스는 일반 노드와 완전히 분리한다.
+  // 14열에는 일반 노드가 그대로 존재하고,
+  // 15열에는 보스 1개만 존재한다.
+  const boss={
+    id:"boss",
+    col:COLS-1,
+    row:2,
+    type:"boss",
+    parents:[],
+    children:[]
+  };
+
+  // 14열의 모든 노드는 하나의 보스로 직접 연결된다.
+  const lastNodes=board[COLS-2].filter(Boolean);
+  for(const node of lastNodes){
+    node.children=["boss"];
+    boss.parents.push(node.id);
+  }
+
+  // 15열은 일반 노드를 절대로 저장하지 않는다.
+  // 보스는 board.boss에만 존재한다.
+  board[COLS-1]=Array(ROWS).fill(null);
+  board.boss=boss;
+
+  // 타입 생성: 왼쪽부터 부모 정보를 참고.
+  for(let c=1;c<COLS-1;c++){
+    for(const node of board[c].filter(Boolean)){
+      const parents=node.parents.map(id=>findNode(id)).filter(Boolean);
+      node.type=chooseType(parents);
+    }
+  }
+
+  // 15열(보스 열)은 일반 노드 타입을 생성하지 않는다.
+  // 보스는 별도 객체로만 관리한다.
+
+  render();
+  validate();
+}
+
+function findNode(id){
+  if(id==="boss") return board.boss;
+  const [c,r]=id.split("-").map(Number);
+  return board[c]?.[r] || null;
+}
+
+function render(){
+  const svg=document.getElementById("svg");
+  const nodes=document.getElementById("nodes");
+  svg.innerHTML="";
+  nodes.innerHTML="";
+
+  const NS="http://www.w3.org/2000/svg";
+  const x=c=>30+c*100+50;
+  const y=r=>35+r*90+45;
+
+  function line(a,b){
+    const el=document.createElementNS(NS,"line");
+    el.setAttribute("x1",x(a.col)); el.setAttribute("y1",y(a.row));
+    el.setAttribute("x2",x(b.col)); el.setAttribute("y2",y(b.row));
+    el.setAttribute("stroke","#555"); el.setAttribute("stroke-width","3");
+    svg.appendChild(el);
+  }
+
+  for(let c=0;c<COLS-1;c++){
+    for(const n of board[c].filter(Boolean)){
+      for(const id of n.children){
+        const target=findNode(id);
+        if(target) line(n,target);
+      }
+    }
+  }
+
+  // 보스 연결선
+  for(const id of board.boss.parents){
+    const n=findNode(id);
+    if(n) line(n,board.boss);
+  }
+
+  for(let c=0;c<COLS-1;c++){
+    for(const n of board[c].filter(Boolean)){
+      const d=document.createElement("div");
+      d.className="node "+(n.type||"");
+      d.style.gridColumn=(c+1);
+      d.style.gridRow=(n.row+1);
+      d.innerHTML=n.type==="start" ? "▶" :
+        n.type==="boss" ? "👑" :
+        (TYPES.find(t=>t.id===n.type)?.icon||"?");
+      const s=document.createElement("span");
+      s.textContent=n.type==="start"?"시작":TYPES.find(t=>t.id===n.type)?.name||"";
+      d.appendChild(s);
+      d.title=`${n.id} / ${n.type}`;
+      nodes.appendChild(d);
+    }
+  }
+
+  // 15열은 보스 1개만 별도로 표시
+  const b=document.createElement("div");
+  b.className="node boss";
+  b.style.gridColumn=15;
+  b.style.gridRow=3;
+  b.innerHTML="👑<span>보스</span>";
+  nodes.appendChild(b);
+}
+
+function validate(){
+  const errors=[];
+  const start=board[0][2];
+
+  if(!start || start.children.length<3) errors.push("시작 칸의 경로가 3개 미만");
+  if(board[0].filter(Boolean).length!==1) errors.push("시작 칸이 1개가 아님");
+
+  for(let c=0;c<COLS-1;c++){
+    for(const n of board[c].filter(Boolean)){
+      for(const id of n.children){
+        const t=findNode(id);
+        if(!t) continue;
+        if(t.col!==n.col+1) errors.push(`${n.id} → ${t.id}: 다음 열이 아님`);
+
+        // 보스 연결은 예외:
+        // 14열의 모든 노드가 15열 중앙의 보스 하나로 합류하므로
+        // 행 차이가 2 이상이어도 정상적인 최종 합류 경로로 인정한다.
+        if(t.id!=="boss" && Math.abs(t.row-n.row)>1)
+          errors.push(`${n.id} → ${t.id}: 수직/비정상 이동`);
+
+        if(n.type!=="combat" && t.type!=="combat" && t.id!=="boss" && n.type===t.type)
+          errors.push(`${n.id} → ${t.id}: 비전투 동일 속성 연속`);
+      }
+    }
+  }
+
+  const lastColumnNodes=board[COLS-2].filter(Boolean);
+  if(board.boss.parents.length===0) errors.push("보스 연결 없음");
+  if(board.boss.parents.length!==lastColumnNodes.length)
+    errors.push("14열의 모든 노드가 보스에 연결되지 않음");
+
+  for(const node of lastColumnNodes){
+    if(!node.children.includes("boss"))
+      errors.push(`${node.id} → 보스 연결 없음`);
+  }
+
+  // 보스 제외 모든 노드에서 보스까지 도달 가능한지 DFS
+  for(let c=0;c<COLS-1;c++){
+    for(const n of board[c].filter(Boolean)){
+      const seen=new Set();
+      const stack=[n.id];
+      let reached=false;
+      while(stack.length){
+        const id=stack.pop();
+        if(seen.has(id)) continue;
+        seen.add(id);
+        if(id==="boss"){reached=true;break}
+        const q=findNode(id);
+        if(q) stack.push(...q.children);
+      }
+      if(!reached) errors.push(`${n.id}에서 보스까지 도달 불가`);
+    }
+  }
+
+  const info=document.getElementById("info");
+  info.innerHTML=errors.length
+    ? `<span class="warn">⚠ 검증 실패</span><br>${errors.map(e=>"• "+e).join("<br>")}`
+    : `<span class="ok">✓ 검증 통과</span><br>
+       시작 경로: ${start.children.length}개 /
+       전투 확률 기준: 50% /
+       마지막 보스: ${board.boss.parents.length}개 경로 연결`;
+}
+
+function downloadBoard(){
+  const clean={
+    cols:COLS,rows:ROWS,
+    nodes:[...Array(COLS-1).keys()].flatMap(c=>board[c].filter(Boolean).map(n=>({
+      id:n.id,col:n.col,row:n.row,type:n.type,parents:n.parents,children:n.children
+    }))),
+    boss:{
+      id:board.boss.id,
+      col:board.boss.col,
+      row:board.boss.row,
+      type:board.boss.type,
+      parents:board.boss.parents,
+      children:board.boss.children
+    }
+  };
+  const blob=new Blob([JSON.stringify(clean,null,2)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="random_board.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+generate();
+</script>
+</body>
+</html>
